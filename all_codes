@@ -1,0 +1,275 @@
+###GWAS was performed using PLINK2 version (v2.00a2LM AVX2 Intel (2 Apr 2019)). 
+
+#preparation of genotype files are not shown here. genoptypes follow standard quality control detailed in the manuscript. 
+#PLINK compatible genotype files are prepared according to PLINK's documentation
+
+#perform GWAS
+plink2 \
+  --pfile genotype_ready_qcd \
+  --pheno Gcase_GALC_ratio_phenotype.txt \
+  --pheno-name Gcase_GALC_ratio \
+  --covar cov.txt \
+  --covar-name AGE,Sex,PC1,PC2,PC3,PC4,cohort \
+  --glm hide-covar \
+  --covar-variance-standardize \
+  --out gwas_Gcase_GALC_ratio_as_phenotype_PPMI_NY_combined_qcd
+
+
+# Meta-analysis was performed using METAL.
+#to sort
+awk 'BEGIN{OFS="\t"}
+NR==1 {
+  print "SNP","A1","A2","BETA","SE","P","N"
+  next
+}
+$7=="ADD" && $9!="NA" && $10!="NA" && $12!="NA" {
+  if ($6==$5) {
+    a2=$4
+  } else if ($6==$4) {
+    a2=$5
+  } else {
+    next
+  }
+  print $3,$6,a2,$9,$10,$12,$8
+}' gwas_Gcase_GALC_ratio_NY_qcd_hwe-4.Gcase_GALC_ratio.glm.linear > NY.metal.txt
+#same procedure was performed for the PPMI cohort (identical code not shown here)
+
+
+#then METAL
+
+SCHEME STDERR
+MARKER SNP
+ALLELE A1 A2
+EFFECT BETA
+STDERR SE
+PVALUE P
+WEIGHT N
+
+PROCESS NY.metal.txt
+PROCESS PPMI.metal.txt
+
+OUTFILE meta_ratio_gwas_ .tbl
+ANALYZE
+
+QUIT
+
+
+###Interaction analysis, correlation analysis, Fisher's r-to-z transformation and all the other graphs and plots were made using R 
+#to make all graphs for all the available snps
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(qqman)
+
+snp_cols <- grep("^chr", colnames(merged_data), value = TRUE)
+
+for (snp_col in snp_cols) {
+
+  df_plot <- merged_data %>%
+    filter(
+      !is.na(Gcase_activity),
+      !is.na(GALC_activity),
+      !is.na(.data[[snp_col]])
+    ) %>%
+    mutate(
+      genotype_f = factor(
+        .data[[snp_col]],
+        levels = c(0, 1, 2),
+        labels = c("0", "1", "2")
+      )
+    )
+
+  p <- ggplot(df_plot,
+              aes(x = Gcase_activity,
+                  y = GALC_activity,
+                  color = genotype_f)) +
+    geom_point(alpha = 0.6, size = 2) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 1.1) +
+    scale_color_manual(values = c("#F28E8C", "#2CA02C", "#5DA5FF")) +
+    labs(
+      x = "Glucocerebrosidase activity",
+      y = "Galactosylceramidase activity",
+      color = paste0(snp_col, " genotype")
+    ) +
+    theme_classic(base_size = 14)
+
+  ggsave(
+    filename = paste0(
+      "Gcase_GALC",
+      gsub("[^A-Za-z0-9._-]+", "_", snp_col),
+      ".png"
+    ),
+    plot = p,
+    width = 6,
+    height = 5,
+    dpi = 300
+  )
+}
+
+
+#to write the correlation values into a csv
+snp_cols <- grep("^chr", names(merged_data), value = TRUE)
+
+merged_data <- merged_data[complete.cases(merged_data[, snp_cols]), ]
+
+out <- data.frame()
+
+for (snp in snp_cols) {
+  for (g in 0:2) {
+
+    idx <- merged_data[[snp]] == g
+    if (sum(idx) < 3) next
+
+    ct <- cor.test(
+      merged_data$Gcase_activity[idx],
+      merged_data$GALC_activity[idx]
+    )
+
+    out <- rbind(out, data.frame(
+      SNP = snp,
+      genotype = g,
+      N = sum(idx),
+      r = ct$estimate,
+      p = ct$p.value,
+      CI_low = ct$conf.int[1],
+      CI_high = ct$conf.int[2]
+    ))
+  }
+}
+
+write.csv(out,"Gcase_Galc_combined_corr.csv",row.names=T)
+
+write.table(out,"Gcase_Galc_combined_corr.csv",sep=",",row.names=F,col.names=T,quote=F)
+
+#to make manhattan plot 
+df <- read.table(
+  "gwas_Gcase_GALC_ratio_as_phenotype_PPMI_NY_combined_qcd.Gcase_GALC_ratio.glm.linear",
+  header = TRUE,
+  sep = "",
+  comment.char = "",
+  stringsAsFactors = FALSE
+)
+
+colnames(df)[colnames(df) == "X.CHROM"] <- "CHR"
+
+df$CHR <- as.numeric(df$CHR)
+df$POS <- as.numeric(df$POS)
+df$P <- as.numeric(df$P)
+
+df <- df[!is.na(df$P), ]
+
+png("MANHATTAN_PLOT_COMBINED_COHORT_GCASE_TO_GALC_RATIO_0.05_FINAL.PNG",width = 3000,height = 1500,res = 300)
+
+par(
+  cex.axis = 1.3,
+  cex.lab = 1.4,
+  cex.main = 1.5)
+
+manhattan(
+  df,
+  chr = "CHR",
+  bp = "POS",
+  p = "P",
+  snp = "ID",
+  main = "GWAS of Gcase/GALC enzymatic activity in the combined cohort",
+  genomewideline = -log10(5e-8),
+  suggestiveline = -log10(1e-5))
+
+dev.off()
+
+
+
+#to have merge manhattan plots
+png("MANHATTAN_PLOT_COMBINED_COHORT_GCASE_TO_GALC_RATIO_0.05_MALE_AND_FEMALE_STRATIFIED_STACKED.PNG",width = 3000,height = 1500,res = 300)
+
+par(mfrow = c(2, 1),
+  cex.axis = 1,
+  cex.lab = 1,
+  cex.main = 1)
+manhattan(
+  df1,
+  chr = "CHR",
+  bp = "POS",
+  p = "P",
+  snp = "ID",
+  main = "GWAS of Gcase/GALC enzymatic activity of combined cohort in females only",
+  genomewideline = -log10(5e-8),
+  suggestiveline = -log10(1e-5))
+manhattan(
+  df2,
+  chr = "CHR",
+  bp = "POS",
+  p = "P",
+  snp = "ID",
+  main = "GWAS of Gcase/GALC enzymatic activity of combined cohort in males only",
+  genomewideline = -log10(5e-8),
+  suggestiveline = -log10(1e-5))
+dev.off()
+
+
+#to perform Fisher's r-to-z test to determine whether two correlations are statistically significantly different
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(cocor)
+
+test_snp_genotype_cor_diff <- function(df,
+                                      snp_col = "SNP",
+                                      geno_col = "genotype",
+                                      n_col   = "N",
+                                      r_col   = "r",
+                                      alternative = "two.sided") {
+
+  d1 <- df %>%
+  group_by(SNP, genotype) %>%
+  summarise(
+    N = first(N),
+    r = first(r),
+    .groups = "drop"
+  )
+
+  wide <- d1 %>%
+    mutate(genotype = paste0("g", genotype)) %>%
+    pivot_wider(names_from = genotype, values_from = c(N, r))
+
+  run_one <- function(r1, r2, n1, n2) {
+    ht <- cocor.indep.groups(
+      r1.jk = r1, r2.hm = r2, n1 = n1, n2 = n2,
+      alternative = alternative,
+      test = "fisher1925",
+      return.htest = TRUE
+    )
+    list(z = unname(ht$fisher1925$statistic), p = ht$fisher1925$p.value)
+  }
+
+  out <- bind_rows(
+    wide %>%
+      mutate(tmp = pmap(list(r_g0, r_g1, N_g0, N_g1), run_one)) %>%
+      transmute(SNP,
+                comparison = "0_vs_1",
+                r1 = r_g0, n1 = N_g0,
+                r2 = r_g1, n2 = N_g1,
+                z = map_dbl(tmp, "z"),
+                p_value = map_dbl(tmp, "p")),
+    wide %>%
+      mutate(tmp = pmap(list(r_g0, r_g2, N_g0, N_g2), run_one)) %>%
+      transmute(SNP,
+                comparison = "0_vs_2",
+                r1 = r_g0, n1 = N_g0,
+                r2 = r_g2, n2 = N_g2,
+                z = map_dbl(tmp, "z"),
+                p_value = map_dbl(tmp, "p")),
+    
+  ) %>%
+    arrange(SNP, comparison)
+
+  out
+}
+
+results_df <- test_snp_genotype_cor_diff(df)
+
+
+#The code to perform interaction between genotype and Gcase is done using R, a linear model with interaction
+
+model <- lm(GALC_activity ~ Gcase_activity + `chr14_87997920` + Gcase_activity * `chr14_87997920`, data=df)
+summary(model)
